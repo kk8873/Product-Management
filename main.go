@@ -54,7 +54,7 @@ func main() {
 
 	// Initialize database
 	var err error
-	db, err = sqlx.Connect("postgres", "host=localhost port=5432 user=youruser password=yourpassword dbname=yourdb sslmode=disable")
+	db, err = sqlx.Connect("postgres", "host=localhost port=5432 user=karanS password=karan1124 dbname=productsdb sslmode=disable")
 	if err != nil {
 		logger.Fatal("Failed to connect to the database:", err)
 	}
