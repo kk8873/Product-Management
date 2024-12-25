@@ -1,47 +1,56 @@
-
 /*
 go get github.com/streadway/amqp
-go get github.com/aws/aws-sdk-go
 go get github.com/nfnt/resize
 go get github.com/sirupsen/logrus
 go get github.com/disintegration/imaging
+go get github.com/lib/pq
 */
 
 package main
 
 import (
 	"bytes"
-	"context"
+	"database/sql"
+	"encoding/json"
 	"image"
 	"image/jpeg"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/disintegration/imaging"
 	"github.com/sirupsen/logrus"
 	"github.com/streadway/amqp"
+	_ "github.com/lib/pq"
 )
 
 // Configuration
 const (
 	rabbitMQURL    = "amqp://guest:guest@localhost:5672/"
 	imageQueueName = "image_queue"
-	s3Bucket       = "your-s3-bucket"
-	region         = "us-east-1"
+	dbHost         = "localhost"
+	dbPort         = 5432
+	dbUser         = "your_user"
+	dbPassword     = "your_password"
+	dbName         = "your_db"
 )
 
-// AWS S3 client
-var s3Client *s3.S3
+// PostgreSQL client
+var db *sql.DB
 
 func main() {
 	// Initialize logger
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.JSONFormatter{})
+
+	// Initialize PostgreSQL
+	var err error
+	connStr := "host=" + dbHost + " port=" + string(dbPort) + " user=" + dbUser + " password=" + dbPassword + " dbname=" + dbName + " sslmode=disable"
+	db, err = sql.Open("postgres", connStr)
+	if err != nil {
+		logger.Fatal("Failed to connect to PostgreSQL:", err)
+	}
+	defer db.Close()
 
 	// Initialize RabbitMQ
 	conn, err := amqp.Dial(rabbitMQURL)
@@ -68,12 +77,6 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to register a consumer:", err)
 	}
-
-	// Initialize AWS S3
-	sess := session.Must(session.NewSession(&aws.Config{
-		Region: aws.String(region),
-	}))
-	s3Client = s3.New(sess)
 
 	// Process messages from the queue
 	forever := make(chan bool)
@@ -119,25 +122,24 @@ func processImage(imageURL string) error {
 	// Compress image
 	compressedImage := imaging.Resize(img, 800, 0, imaging.Lanczos)
 
-	// Save compressed image to S3
-	imageName := getImageName(imageURL)
-	return uploadToS3(compressedImage, imageName)
-}
-
-func uploadToS3(img image.Image, imageName string) error {
-	// Convert image to JPEG format
+	// Convert image to bytes
 	buf := new(bytes.Buffer)
-	if err := jpeg.Encode(buf, img, &jpeg.Options{Quality: 80}); err != nil {
+	if err := jpeg.Encode(buf, compressedImage, &jpeg.Options{Quality: 80}); err != nil {
 		return err
 	}
+	imageBytes := buf.Bytes()
 
-	// Upload to S3
-	_, err := s3Client.PutObject(&s3.PutObjectInput{
-		Bucket:      aws.String(s3Bucket),
-		Key:         aws.String(imageName),
-		Body:        bytes.NewReader(buf.Bytes()),
-		ContentType: aws.String("image/jpeg"),
-	})
+	// Save image to PostgreSQL
+	imageName := getImageName(imageURL)
+	return saveImageToDB(imageURL, imageName, imageBytes, "processed")
+}
+
+func saveImageToDB(imageURL, imageName string, imageBytes []byte, status string) error {
+	query := `
+		INSERT INTO image_data (image_url, image_name, image_content, status, processed_at)
+		VALUES ($1, $2, $3, $4, NOW())
+	`
+	_, err := db.Exec(query, imageURL, imageName, imageBytes, status)
 	return err
 }
 
